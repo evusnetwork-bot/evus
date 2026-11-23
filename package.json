@@ -1,10 +1,41 @@
 {
   "name": "conecta-desktop",
-  "version": "1.0.1",
+  "version": "1.5.0",
   "description": "Chamadas de voz e compartilhamento de tela para Windows",
   "main": "main.js",
-  "scripts": {"start": "electron .", "signal": "node server.js", "dist": "electron-builder --win nsis"},
-  "dependencies": {"ws": "^8.18.0"},
-  "devDependencies": {"electron": "^35.0.0", "electron-builder": "^26.0.12"},
-  "build": {"appId": "br.conecta.desktop", "productName": "Conecta", "files": ["main.js", "preload.js", "server.js", "index.html", "renderer.js", "style.css", "package.json"], "win": {"target": "nsis"}}
+  "scripts": {
+    "start": "electron .",
+    "signal": "node server.js",
+    "dist": "electron-builder --win nsis"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "br.conecta.desktop",
+    "productName": "CONECTA EVUS",
+    "files": [
+      "main.js",
+      "preload.js",
+      "server.js",
+      "index.html",
+      "renderer.js",
+      "style.css",
+      "package.json",
+      "assets/icon.ico"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
+    }
+  }
 }
