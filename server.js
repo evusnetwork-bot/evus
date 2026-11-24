@@ -13,7 +13,7 @@ function startServer({ port = 8787, host = '127.0.0.1', socialPool, heartbeatMs 
     else { res.writeHead(404); res.end('Não encontrado'); }
   });
   const server = new WebSocketServer({ server: httpServer, maxPayload: MAX_PAYLOAD_BYTES });
-  const heartbeat=setInterval(()=>{for(const client of server.clients){if(client.readyState!==WebSocket.OPEN)continue;if(!client.isAlive){client.terminate();continue;}client.isAlive=false;client.ping();}},heartbeatMs);heartbeat.unref?.();
+  const heartbeat=setInterval(()=>{for(const client of server.clients){if(client.readyState!==WebSocket.OPEN)continue;if(!client.isAlive){client.terminate();continue;}client.isAlive=false;client.ping();if(client.voiceIdentity)social.authorizeVoice(client.voiceSession,client.voiceChannel).then(m=>{if(!m||m.userId!==client.voiceIdentity.userId)client.close(4003,'Acesso revogado');}).catch(()=>client.close(1011,'Falha de autorização'));}},heartbeatMs);heartbeat.unref?.();
   const closeWebSocket = server.close.bind(server);
   server.close = callback => { clearInterval(heartbeat); closeWebSocket(callback); httpServer.close(); social.close()?.catch(() => {}); };
   httpServer.on('error', error => server.emit('error', error));
@@ -26,12 +26,16 @@ function startServer({ port = 8787, host = '127.0.0.1', socialPool, heartbeatMs 
     social.attach(ws);
     ws.id = randomUUID(); ws.lastChatTime = 0;
     ws.on('error', () => {});
-    ws.on('message', raw => {
+    ws.on('message', async raw => {
       let m; try { m = JSON.parse(raw.toString()); } catch { return; }
       if (!m || typeof m !== 'object' || Array.isArray(m)) return;
-      if (m.type === 'join' && !ws.room && typeof m.room === 'string' && typeof m.name === 'string') {
+      if (m.type === 'join' && !ws.room && !ws.joining && typeof m.room === 'string' && typeof m.name === 'string') {
         const room = m.room.trim().slice(0, 64), name = m.name.trim().slice(0, 32);
         if (!room || !name) return;
+        if (room.startsWith('group-')) {
+          ws.joining=true;const channelId=room.slice(6);if(!/^[0-9a-f-]{36}$/.test(channelId))return send(ws,{type:'error',message:'Canal inválido.'});
+          try { const identity=await social.authorizeVoice(m.session,channelId);if(!identity||ws.readyState!==WebSocket.OPEN||ws.room)return send(ws,{type:'error',message:'Acesso ao canal de voz negado.'});ws.voiceIdentity=identity;ws.voiceSession=m.session;ws.voiceChannel=channelId;ws.joining=false; } catch {return send(ws,{type:'error',message:'Não foi possível verificar o canal de voz.'});}
+        }
         if (!rooms.has(room)) rooms.set(room, new Map());
         const peers = rooms.get(room);
         if (peers.size >= 6) return send(ws, { type: 'error', message: 'Esta sala está cheia (limite de 6 pessoas).' });

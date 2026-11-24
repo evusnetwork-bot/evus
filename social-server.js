@@ -8,6 +8,7 @@ const validPassword = value => typeof value === 'string' && value.length >= 10 &
 async function passwordDigest(password, salt = randomBytes(16)) { const hash = await derivePassword(password, salt, 64, {N:16384,r:8,p:1,maxmem:64*1024*1024}); return `scrypt$${salt.toString('base64url')}$${hash.toString('base64url')}`; }
 async function passwordMatches(password, encoded) { const parts = typeof encoded === 'string' ? encoded.split('$') : []; const salt = parts.length===3 ? Buffer.from(parts[1],'base64url') : Buffer.alloc(16); const expected = parts.length===3 ? Buffer.from(parts[2],'base64url') : Buffer.alloc(64); const valid = parts[0]==='scrypt' && salt.length===16 && expected.length===64; const computed = await derivePassword(password, valid?salt:Buffer.alloc(16), 64, {N:16384,r:8,p:1,maxmem:64*1024*1024}); return valid && timingSafeEqual(computed, expected); }
 const { Pool } = require('pg');
+const { createGroups } = require('./groups-server');
 const MAX_IMAGE = 350000;
 const MAX_FILE = 4 * 1024 * 1024;
 const presenceValues = new Set(['online','away','busy']);
@@ -19,19 +20,21 @@ const trimmed = (value, n) => typeof value === 'string' ? value.trim().slice(0,n
 const publicUser = u => ({id:u.id, tag:u.tag, username:u.username, displayName:u.display_name, bio:u.bio, avatar:u.avatar, banner:u.banner, pronouns:u.pronouns||'', color:validColor(u.color)?u.color:'#ec8053', presence:presenceValues.has(u.presence)?u.presence:'online'});
 function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 10000 }) : null} = {}) {
   const online = new Map();
+  let groups;
   let registrationWindow = 0, registrationCount = 0, authWindow = 0, authCount = 0; const attempts = new Map();
   let initialization = null;
   function ready() {
-    if (!initialization) initialization = pool.query(`CREATE TABLE IF NOT EXISTS evus_users (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, tag TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, bio TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', banner TEXT NOT NULL DEFAULT '')`).then(() => pool.query('ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS username TEXT')).then(() => pool.query('ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS password_hash TEXT')).then(() => pool.query('CREATE UNIQUE INDEX IF NOT EXISTS evus_users_username_idx ON evus_users(username)')).then(() => pool.query("ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS presence TEXT NOT NULL DEFAULT 'online'")).then(() => pool.query("ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS pronouns TEXT NOT NULL DEFAULT ''")).then(() => pool.query("ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '#ec8053'")).then(() => pool.query('CREATE TABLE IF NOT EXISTS evus_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES evus_users(id), expires_at BIGINT NOT NULL)')).then(() => pool.query(`CREATE TABLE IF NOT EXISTS evus_friendships (a TEXT NOT NULL REFERENCES evus_users(id), b TEXT NOT NULL REFERENCES evus_users(id), requester TEXT NOT NULL REFERENCES evus_users(id), status TEXT NOT NULL, PRIMARY KEY (a,b))`)).then(() => pool.query(`CREATE TABLE IF NOT EXISTS evus_messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL REFERENCES evus_users(id), recipient TEXT NOT NULL REFERENCES evus_users(id), body TEXT NOT NULL, created_at BIGINT NOT NULL)`)).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS read_at BIGINT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_name TEXT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_mime TEXT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_size INTEGER')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_data TEXT')).then(() => pool.query('CREATE TABLE IF NOT EXISTS evus_blocks (blocker TEXT NOT NULL REFERENCES evus_users(id), blocked TEXT NOT NULL REFERENCES evus_users(id), PRIMARY KEY (blocker,blocked))')).catch(e => { initialization = null; console.error('Banco social indisponível:',e.message); throw e; });
+    if (!initialization) initialization = pool.query(`CREATE TABLE IF NOT EXISTS evus_users (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, tag TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, bio TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', banner TEXT NOT NULL DEFAULT '')`).then(() => pool.query('ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS username TEXT')).then(() => pool.query('ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS password_hash TEXT')).then(() => pool.query('CREATE UNIQUE INDEX IF NOT EXISTS evus_users_username_idx ON evus_users(username)')).then(() => pool.query("ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS presence TEXT NOT NULL DEFAULT 'online'")).then(() => pool.query("ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS pronouns TEXT NOT NULL DEFAULT ''")).then(() => pool.query("ALTER TABLE evus_users ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '#ec8053'")).then(() => pool.query('CREATE TABLE IF NOT EXISTS evus_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES evus_users(id), expires_at BIGINT NOT NULL)')).then(() => pool.query(`CREATE TABLE IF NOT EXISTS evus_friendships (a TEXT NOT NULL REFERENCES evus_users(id), b TEXT NOT NULL REFERENCES evus_users(id), requester TEXT NOT NULL REFERENCES evus_users(id), status TEXT NOT NULL, PRIMARY KEY (a,b))`)).then(() => pool.query(`CREATE TABLE IF NOT EXISTS evus_messages (id TEXT PRIMARY KEY, sender TEXT NOT NULL REFERENCES evus_users(id), recipient TEXT NOT NULL REFERENCES evus_users(id), body TEXT NOT NULL, created_at BIGINT NOT NULL)`)).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS read_at BIGINT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_name TEXT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_mime TEXT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_size INTEGER')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS file_data TEXT')).then(() => pool.query('CREATE TABLE IF NOT EXISTS evus_blocks (blocker TEXT NOT NULL REFERENCES evus_users(id), blocked TEXT NOT NULL REFERENCES evus_users(id), PRIMARY KEY (blocker,blocked))')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS reply_to TEXT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS edited_at BIGINT')).then(() => pool.query('ALTER TABLE evus_messages ADD COLUMN IF NOT EXISTS deleted_at BIGINT')).then(() => pool.query('CREATE TABLE IF NOT EXISTS evus_message_reactions (message_id TEXT NOT NULL REFERENCES evus_messages(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES evus_users(id), emoji TEXT NOT NULL, PRIMARY KEY(message_id,user_id,emoji))')).then(() => groups.initialize()).catch(e => { initialization = null; console.error('Banco social indisponível:',e.message); throw e; });
     return initialization;
   }
   const send=(ws,x)=>{if(ws.readyState===1)ws.send(JSON.stringify(x));};
   const emit=(id,event)=>{for(const ws of online.get(id)||[])send(ws,{type:'social-event',event});};
+  groups=createGroups({pool,emit,cleanAttachment});
   const pair=(a,b)=>[a,b].sort();
   async function userById(id){return (await pool.query('SELECT * FROM evus_users WHERE id = $1',[id])).rows[0];}
   async function relationship(a,b){const [x,y]=pair(a,b);return (await pool.query('SELECT * FROM evus_friendships WHERE a = $1 AND b = $2',[x,y])).rows[0];}
   async function isBlocked(a,b){return (await pool.query('SELECT blocker FROM evus_blocks WHERE (blocker = $1 AND blocked = $2) OR (blocker = $2 AND blocked = $1)',[a,b])).rows.length>0;}
-  const messageInfo=m=>({id:m.id,sender:m.sender,recipient:m.recipient,body:m.body,createdAt:Number(m.created_at),attachment:m.file_name?{name:m.file_name,mime:m.file_mime,size:Number(m.file_size)}:null});
+  const messageInfo=m=>({id:m.id,sender:m.sender,recipient:m.recipient,body:m.body,createdAt:Number(m.created_at),replyTo:m.reply_to||null,editedAt:m.edited_at?Number(m.edited_at):null,deletedAt:m.deleted_at?Number(m.deleted_at):null,attachment:m.file_name?{name:m.file_name,mime:m.file_mime,size:Number(m.file_size)}:null});
   async function list(userId){
     const links=(await pool.query('SELECT * FROM evus_friendships WHERE a = $1 OR b = $1',[userId])).rows;
     const friends=[],incoming=[],outgoing=[];
@@ -87,6 +90,7 @@ function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectio
     }
     if(!ws.socialId)throw Error('Entre na sua conta para continuar.');if(Date.now()>=ws.sessionExpiresAt){ws.close();throw Error('Sessão expirada. Entre novamente.');}const self=ws.socialId;
     if(action==='logout'){if(ws.sessionHash)await pool.query('DELETE FROM evus_sessions WHERE token_hash = $1',[ws.sessionHash]);ws.socialId=null;const conns=online.get(self);conns?.delete(ws);if(!conns?.size){online.delete(self);for(const f of (await list(self)).friends)emit(f.id,{kind:'refresh'});}return {}; }
+    if(action.startsWith('group-'))return groups.run(action,msg,self);
     if(action==='list')return list(self);
     if(action==='profile'){
       const current=await userById(self),name=trimmed(msg.displayName,32),bio=trimmed(msg.bio,500),pronouns=msg.pronouns === undefined ? current.pronouns : trimmed(msg.pronouns,40),color=msg.color === undefined ? current.color : msg.color;if(!name||!isImage(msg.avatar)||!isImage(msg.banner)||!validColor(color))throw Error('Confira o nome e as imagens do perfil.');
@@ -129,20 +133,32 @@ function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectio
       if(!room)throw Error('Informe o nome da sala.');if(!online.has(other))throw Error('Seu amigo está offline. Combine a sala quando ele entrar.');
       emit(other,{kind:'invite',from:publicUser(await userById(self)),room});return {};
     }
-    if(['history','message','mark-read','file'].includes(action)){
+    if(['history','message','mark-read','file','message-edit','message-delete','message-react','message-search'].includes(action)){
       const other=trimmed(msg.userId,64),link=await relationship(self,other);if(!link||link.status!=='accepted'||await isBlocked(self,other))throw Error('Esta conversa está disponível somente para amigos.');
       if(action==='message'){
-        const body=trimmed(msg.text,4000),attachment=msg.attachment==null?null:cleanAttachment(msg.attachment);if(!body&&!attachment)throw Error('Escreva uma mensagem ou escolha um arquivo.');const now=Date.now(),id=randomUUID();
-        await pool.query('INSERT INTO evus_messages (id,sender,recipient,body,created_at,file_name,file_mime,file_size,file_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',[id,self,other,body,now,attachment?.name||null,attachment?.mime||null,attachment?.size||null,attachment?.data||null]);
-        const item={id,sender:self,recipient:other,body,createdAt:now,attachment:attachment?{name:attachment.name,mime:attachment.mime,size:attachment.size}:null};emit(self,{kind:'message',message:item});emit(other,{kind:'message',message:item});return {message:item};
+        const body=trimmed(msg.text,4000),attachment=msg.attachment==null?null:cleanAttachment(msg.attachment);if(!body&&!attachment)throw Error('Escreva uma mensagem ou escolha um arquivo.');const now=Date.now(),id=randomUUID(),reply=trimmed(msg.replyTo,64)||null;if(reply){const original=(await pool.query('SELECT sender,recipient FROM evus_messages WHERE id = $1',[reply])).rows[0];if(!original||!((original.sender===self&&original.recipient===other)||(original.sender===other&&original.recipient===self)))throw Error('Mensagem para resposta não encontrada.');}
+        await pool.query('INSERT INTO evus_messages (id,sender,recipient,body,created_at,file_name,file_mime,file_size,file_data,reply_to) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[id,self,other,body,now,attachment?.name||null,attachment?.mime||null,attachment?.size||null,attachment?.data||null,reply]);
+        const item={id,sender:self,recipient:other,body,createdAt:now,replyTo:reply,reactions:[],attachment:attachment?{name:attachment.name,mime:attachment.mime,size:attachment.size}:null};emit(self,{kind:'message',message:item});emit(other,{kind:'message',message:item});return {message:item};
+      }
+      if(['message-edit','message-delete','message-react'].includes(action)){
+        const id=trimmed(msg.messageId,64), m=(await pool.query('SELECT * FROM evus_messages WHERE id = $1',[id])).rows[0];
+        if(!m||!((m.sender===self&&m.recipient===other)||(m.sender===other&&m.recipient===self))||m.deleted_at)throw Error('Mensagem não encontrada.');
+        if(action==='message-edit'){if(m.sender!==self)throw Error('Não é possível editar a mensagem de outra pessoa.');const body=trimmed(msg.text,4000);if(!body)throw Error('Escreva uma mensagem.');await pool.query('UPDATE evus_messages SET body=$1,edited_at=$2 WHERE id=$3 AND sender=$4',[body,Date.now(),id,self]);}
+        if(action==='message-delete'){if(m.sender!==self)throw Error('Não é possível excluir a mensagem de outra pessoa.');await pool.query("UPDATE evus_messages SET body='',file_name=NULL,file_mime=NULL,file_size=NULL,file_data=NULL,deleted_at=$1 WHERE id=$2 AND sender=$3",[Date.now(),id,self]);await pool.query('DELETE FROM evus_message_reactions WHERE message_id=$1',[id]);}
+        if(action==='message-react'){const emoji=msg.emoji;if(!['👍','❤️','😂','😮','😢','🎉'].includes(emoji))throw Error('Reação inválida.');const found=await pool.query('DELETE FROM evus_message_reactions WHERE message_id=$1 AND user_id=$2 AND emoji=$3 RETURNING emoji',[id,self,emoji]);if(!found.rowCount)await pool.query('INSERT INTO evus_message_reactions (message_id,user_id,emoji) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',[id,self,emoji]);}
+        emit(self,{kind:'conversation-changed',userId:other});emit(other,{kind:'conversation-changed',userId:self});return {};
+      }
+      if(action==='message-search'){
+        const term=trimmed(msg.query,100);if(!term)throw Error('Informe o texto para pesquisar.');
+        const rows=(await pool.query("SELECT * FROM evus_messages WHERE ((sender=$1 AND recipient=$2) OR (sender=$2 AND recipient=$1)) AND deleted_at IS NULL AND strpos(lower(body),lower($3))>0 ORDER BY created_at DESC LIMIT 100",[self,other,term])).rows;return {messages:rows.reverse().map(messageInfo)};
       }
       if(action==='file'){
         const id=trimmed(msg.messageId,64);const m=(await pool.query('SELECT * FROM evus_messages WHERE id = $1',[id])).rows[0];if(!m||!m.file_data||!((m.sender===self&&m.recipient===other)||(m.sender===other&&m.recipient===self)))throw Error('Arquivo não encontrado.');return {attachment:{name:m.file_name,mime:m.file_mime,size:Number(m.file_size),data:m.file_data}};
       }
       await pool.query('UPDATE evus_messages SET read_at = $1 WHERE sender = $2 AND recipient = $3 AND read_at IS NULL',[Date.now(),other,self]);
       if(action==='mark-read')return {};
-      const rows=(await pool.query('SELECT id,sender,recipient,body,created_at,file_name,file_mime,file_size FROM evus_messages WHERE (sender = $1 AND recipient = $2) OR (sender = $2 AND recipient = $1) ORDER BY created_at DESC LIMIT 100',[self,other])).rows;
-      return {messages:rows.reverse().map(messageInfo)};
+      const rows=(await pool.query('SELECT id,sender,recipient,body,created_at,file_name,file_mime,file_size,reply_to,edited_at,deleted_at FROM evus_messages WHERE (sender = $1 AND recipient = $2) OR (sender = $2 AND recipient = $1) ORDER BY created_at DESC LIMIT 100',[self,other])).rows;
+      const items=rows.reverse().map(messageInfo);for(const item of items){item.reactions=(await pool.query('SELECT user_id,emoji FROM evus_message_reactions WHERE message_id=$1',[item.id])).rows.map(r=>({userId:r.user_id,emoji:r.emoji}));}return {messages:items};
     }
     throw Error('Operação desconhecida.');
   }
@@ -155,6 +171,6 @@ function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectio
     });
     ws.on('close',()=>{const id=ws.socialId;if(!id)return;const connections=online.get(id);connections?.delete(ws);if(!connections?.size){online.delete(id);if(pool)list(id).then(({friends})=>friends.forEach(f=>emit(f.id,{kind:'refresh'}))).catch(()=>{});}});
   }
-  return {attach,ready,close:()=>pool?.end()};
+  return {attach,ready,authorizeVoice:async(session,channelId)=>{if(!pool)return false;await ready();return groups.authorizeVoice(session,channelId);},membership:groups.membership,close:()=>pool?.end()};
 }
 module.exports={createSocialHub};

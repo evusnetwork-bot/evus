@@ -1,0 +1,66 @@
+'use strict';
+const {randomUUID,randomBytes,createHash}=require('crypto');
+const trim=(v,n)=>typeof v==='string'?v.trim().slice(0,n):'';
+const emojis=new Set(['👍','❤️','😂','😮','😢','🎉']);
+function createGroups({pool,emit,cleanAttachment}) {
+  async function initialize(){
+    await pool.query('CREATE TABLE IF NOT EXISTS evus_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL REFERENCES evus_users(id), invite_code TEXT NOT NULL UNIQUE, created_at BIGINT NOT NULL)');
+    await pool.query('CREATE TABLE IF NOT EXISTS evus_group_members (group_id TEXT NOT NULL REFERENCES evus_groups(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES evus_users(id), role TEXT NOT NULL, PRIMARY KEY(group_id,user_id))');
+    await pool.query('CREATE TABLE IF NOT EXISTS evus_group_channels (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES evus_groups(id) ON DELETE CASCADE, name TEXT NOT NULL, kind TEXT NOT NULL, created_at BIGINT NOT NULL)');
+    await pool.query('CREATE TABLE IF NOT EXISTS evus_group_messages (id TEXT PRIMARY KEY, channel_id TEXT NOT NULL REFERENCES evus_group_channels(id) ON DELETE CASCADE, sender TEXT NOT NULL REFERENCES evus_users(id), body TEXT NOT NULL, created_at BIGINT NOT NULL, reply_to TEXT, edited_at BIGINT, deleted_at BIGINT, file_name TEXT, file_mime TEXT, file_size INTEGER, file_data TEXT)');
+    await pool.query('CREATE TABLE IF NOT EXISTS evus_group_reactions (message_id TEXT NOT NULL REFERENCES evus_group_messages(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES evus_users(id), emoji TEXT NOT NULL, PRIMARY KEY(message_id,user_id,emoji))');
+  }
+  async function membership(groupId,userId){return (await pool.query('SELECT * FROM evus_group_members WHERE group_id=$1 AND user_id=$2',[groupId,userId])).rows[0];}
+  async function member(groupId,userId){const m=await membership(groupId,userId);if(!m)throw Error('Não é membro deste grupo.');return m;}
+  async function admin(groupId,userId){const m=await member(groupId,userId);if(!['owner','admin'].includes(m.role))throw Error('Não possui permissão para gerenciar este grupo.');return m;}
+  async function channel(id,userId,kind){const c=(await pool.query('SELECT * FROM evus_group_channels WHERE id=$1',[id])).rows[0];if(!c)throw Error('Canal não encontrado.');await member(c.group_id,userId);if(kind&&c.kind!==kind)throw Error('Canal incompatível.');return c;}
+  async function broadcast(groupId,event){const rows=(await pool.query('SELECT user_id FROM evus_group_members WHERE group_id=$1',[groupId])).rows;for(const m of rows)emit(m.user_id,event);}
+  const info=m=>({id:m.id,channelId:m.channel_id,sender:m.sender,displayName:m.display_name||'',body:m.body,createdAt:Number(m.created_at),replyTo:m.reply_to||null,editedAt:m.edited_at?Number(m.edited_at):null,deletedAt:m.deleted_at?Number(m.deleted_at):null,attachment:m.file_name?{name:m.file_name,mime:m.file_mime,size:Number(m.file_size)}:null});
+  async function list(user){const rows=(await pool.query('SELECT g.id,g.name,g.owner_id,m.role FROM evus_groups g JOIN evus_group_members m ON m.group_id=g.id WHERE m.user_id=$1 ORDER BY g.created_at',[user])).rows;return {groups:rows.map(g=>({id:g.id,name:g.name,ownerId:g.owner_id,role:g.role}))};}
+  async function details(groupId,user){const me=await member(groupId,user),g=(await pool.query('SELECT id,name,owner_id,invite_code FROM evus_groups WHERE id=$1',[groupId])).rows[0];const channels=(await pool.query('SELECT id,name,kind FROM evus_group_channels WHERE group_id=$1 ORDER BY created_at,id',[groupId])).rows;const members=(await pool.query('SELECT u.id,u.display_name,u.tag,m.role FROM evus_group_members m JOIN evus_users u ON u.id=m.user_id WHERE m.group_id=$1 ORDER BY u.display_name',[groupId])).rows;return {group:{id:g.id,name:g.name,ownerId:g.owner_id,role:me.role,inviteCode:['owner','admin'].includes(me.role)?g.invite_code:null},channels,members:members.map(m=>({id:m.id,displayName:m.display_name,tag:m.tag,role:m.role}))};}
+  async function run(action,msg,self){
+    if(!action.startsWith('group-'))return null;
+    if(action==='group-list')return list(self);
+    if(action==='group-create'){
+      const name=trim(msg.name,40);if(!name)throw Error('Informe o nome do grupo.');const id=randomUUID(),code='EVUSG-'+randomBytes(18).toString('base64url'),now=Date.now();
+      await pool.query('WITH g AS (INSERT INTO evus_groups(id,name,owner_id,invite_code,created_at) VALUES($1,$2,$3,$4,$5) RETURNING id), m AS (INSERT INTO evus_group_members(group_id,user_id,role) SELECT id,$3,\'owner\' FROM g) INSERT INTO evus_group_channels(id,group_id,name,kind,created_at) SELECT $6,id,\'geral\',\'text\',$5 FROM g',[id,name,self,code,now,randomUUID()]);
+      await pool.query('INSERT INTO evus_group_channels(id,group_id,name,kind,created_at) VALUES($1,$2,$3,$4,$5)',[randomUUID(),id,'Sala de voz','voice',now+1]);return details(id,self);
+    }
+    if(action==='group-join'){
+      const code=trim(msg.code,40);if(!/^EVUSG-[A-Za-z0-9_-]{24}$/.test(code))throw Error('Código de convite inválido.');const g=(await pool.query('SELECT id FROM evus_groups WHERE invite_code=$1',[code])).rows[0];if(!g)throw Error('Convite inválido ou revogado.');await pool.query("INSERT INTO evus_group_members(group_id,user_id,role) VALUES($1,$2,'member') ON CONFLICT DO NOTHING",[g.id,self]);await broadcast(g.id,{kind:'group-refresh',groupId:g.id});return details(g.id,self);
+    }
+    const groupId=trim(msg.groupId,64);
+    if(action==='group-details')return details(groupId,self);
+    if(action==='group-channel-create'){await admin(groupId,self);const name=trim(msg.name,40),kind=msg.kind;if(!name||!['text','voice'].includes(kind))throw Error('Informe um nome e tipo de canal válidos.');await pool.query('INSERT INTO evus_group_channels(id,group_id,name,kind,created_at) VALUES($1,$2,$3,$4,$5)',[randomUUID(),groupId,name,kind,Date.now()]);await broadcast(groupId,{kind:'group-refresh',groupId});return details(groupId,self);}
+    if(action==='group-invite-reset'){await admin(groupId,self);await pool.query('UPDATE evus_groups SET invite_code=$1 WHERE id=$2',['EVUSG-'+randomBytes(18).toString('base64url'),groupId]);return details(groupId,self);}
+    if(action==='group-role'||action==='group-kick'){
+      const me=await admin(groupId,self),target=trim(msg.userId,64),other=await member(groupId,target);if(target===self||other.role==='owner'||(other.role==='admin'&&me.role!=='owner'))throw Error('Não possui permissão para alterar este membro.');
+      if(action==='group-role'){if(me.role!=='owner'||!['admin','member'].includes(msg.role))throw Error('Somente o proprietário pode alterar administradores.');await pool.query('UPDATE evus_group_members SET role=$1 WHERE group_id=$2 AND user_id=$3',[msg.role,groupId,target]);}
+      else await pool.query('DELETE FROM evus_group_members WHERE group_id=$1 AND user_id=$2',[groupId,target]);emit(target,{kind:'group-refresh',groupId});await broadcast(groupId,{kind:'group-refresh',groupId});return details(groupId,self);
+    }
+    if(action==='group-leave'){const me=await member(groupId,self);if(me.role==='owner')throw Error('O proprietário não pode sair do grupo.');await pool.query('DELETE FROM evus_group_members WHERE group_id=$1 AND user_id=$2',[groupId,self]);await broadcast(groupId,{kind:'group-refresh',groupId});return list(self);}
+    if(action==='group-voice'){const c=await channel(trim(msg.channelId,64),self,'voice');return {room:'group-'+c.id,channelId:c.id};}
+    const channelId=trim(msg.channelId,64),c=await channel(channelId,self,'text');
+    if(action==='group-history'||action==='group-search'){
+      const term=trim(msg.query,100);if(action==='group-search'&&!term)throw Error('Informe o texto para pesquisar.');
+      const rows=(await pool.query('SELECT m.*,u.display_name FROM evus_group_messages m JOIN evus_users u ON u.id=m.sender WHERE m.channel_id=$1 AND ($2=\'\' OR (m.deleted_at IS NULL AND strpos(lower(m.body),lower($2))>0)) ORDER BY m.created_at DESC LIMIT 100',[channelId,term])).rows;
+      const messages=rows.reverse().map(info);for(const item of messages)item.reactions=(await pool.query('SELECT user_id,emoji FROM evus_group_reactions WHERE message_id=$1',[item.id])).rows.map(x=>({userId:x.user_id,emoji:x.emoji}));return {messages};
+    }
+    if(action==='group-message'){
+      const body=trim(msg.text,4000),file=msg.attachment==null?null:cleanAttachment(msg.attachment),reply=trim(msg.replyTo,64)||null;if(!body&&!file)throw Error('Escreva uma mensagem ou escolha um arquivo.');if(reply){const ref=(await pool.query('SELECT id FROM evus_group_messages WHERE id=$1 AND channel_id=$2',[reply,channelId])).rows[0];if(!ref)throw Error('Mensagem para resposta não encontrada.');}
+      await pool.query('INSERT INTO evus_group_messages(id,channel_id,sender,body,created_at,reply_to,file_name,file_mime,file_size,file_data) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[randomUUID(),channelId,self,body,Date.now(),reply,file?.name||null,file?.mime||null,file?.size||null,file?.data||null]);await broadcast(c.group_id,{kind:'group-message',groupId:c.group_id,channelId});return {};
+    }
+    if(['group-edit','group-delete','group-react','group-file'].includes(action)){
+      const id=trim(msg.messageId,64),m=(await pool.query('SELECT * FROM evus_group_messages WHERE id=$1 AND channel_id=$2',[id,channelId])).rows[0];if(!m||m.deleted_at)throw Error('Mensagem não encontrada.');
+      if(action==='group-file'){if(!m.file_data)throw Error('Arquivo não encontrado.');return {attachment:{name:m.file_name,mime:m.file_mime,size:Number(m.file_size),data:m.file_data}};}
+      if(action==='group-edit'){if(m.sender!==self)throw Error('Não é possível editar mensagens de outra pessoa.');const text=trim(msg.text,4000);if(!text)throw Error('Escreva uma mensagem.');await pool.query('UPDATE evus_group_messages SET body=$1,edited_at=$2 WHERE id=$3 AND sender=$4',[text,Date.now(),id,self]);}
+      if(action==='group-delete'){if(m.sender!==self)throw Error('Não é possível excluir mensagens de outra pessoa.');await pool.query("UPDATE evus_group_messages SET body='',file_name=NULL,file_mime=NULL,file_size=NULL,file_data=NULL,deleted_at=$1 WHERE id=$2 AND sender=$3",[Date.now(),id,self]);await pool.query('DELETE FROM evus_group_reactions WHERE message_id=$1',[id]);}
+      if(action==='group-react'){if(!emojis.has(msg.emoji))throw Error('Reação inválida.');const old=await pool.query('DELETE FROM evus_group_reactions WHERE message_id=$1 AND user_id=$2 AND emoji=$3 RETURNING emoji',[id,self,msg.emoji]);if(!old.rowCount)await pool.query('INSERT INTO evus_group_reactions(message_id,user_id,emoji) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[id,self,msg.emoji]);}
+      await broadcast(c.group_id,{kind:'group-message',groupId:c.group_id,channelId});return {};
+    }
+    throw Error('Operação desconhecida.');
+  }
+  async function authorizeVoice(session,channelId){if(typeof session!=='string'||!/^sess_[A-Za-z0-9_-]{43}$/.test(session))return false;const hash=createHash('sha256').update(session).digest('hex');const row=(await pool.query('SELECT * FROM evus_sessions WHERE token_hash=$1',[hash])).rows[0];if(!row||Number(row.expires_at)<=Date.now())return false;try{const c=await channel(channelId,row.user_id,'voice');return {userId:row.user_id,groupId:c.group_id};}catch{return false;}}
+  return {initialize,run,authorizeVoice,membership};
+}
+module.exports={createGroups};
