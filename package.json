@@ -1,6 +1,6 @@
 {
   "name": "conecta-evus-servidor",
-  "version": "2.3.0",
+  "version": "2.5.0",
   "private": true,
   "description": "Sinalização, perfis, amigos e conversas do CONECTA EVUS",
   "scripts": {
