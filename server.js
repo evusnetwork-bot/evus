@@ -4,7 +4,7 @@ const http = require('http');
 const { createSocialHub } = require('./social-server');
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES = 6 * 1024 * 1024;
-function startServer({ port = 8787, host = '127.0.0.1', socialPool } = {}) {
+function startServer({ port = 8787, host = '127.0.0.1', socialPool, heartbeatMs = 30000 } = {}) {
   const social = createSocialHub({pool: socialPool});
   const rooms = new Map();
   const httpServer = http.createServer((req, res) => {
@@ -13,14 +13,16 @@ function startServer({ port = 8787, host = '127.0.0.1', socialPool } = {}) {
     else { res.writeHead(404); res.end('Não encontrado'); }
   });
   const server = new WebSocketServer({ server: httpServer, maxPayload: MAX_PAYLOAD_BYTES });
+  const heartbeat=setInterval(()=>{for(const client of server.clients){if(client.readyState!==WebSocket.OPEN)continue;if(!client.isAlive){client.terminate();continue;}client.isAlive=false;client.ping();}},heartbeatMs);heartbeat.unref?.();
   const closeWebSocket = server.close.bind(server);
-  server.close = callback => { closeWebSocket(callback); httpServer.close(); social.close()?.catch(() => {}); };
+  server.close = callback => { clearInterval(heartbeat); closeWebSocket(callback); httpServer.close(); social.close()?.catch(() => {}); };
   httpServer.on('error', error => server.emit('error', error));
   httpServer.listen(port, host);
   server.on('error', error => { if (error.code !== 'EADDRINUSE') console.error('Erro no servidor de sinalização:', error.message); });
   function send(ws, data) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); }
   function reject(ws, message, clientId) { send(ws, { type: 'chat-error', message, ...(clientId ? { clientId } : {}) }); }
   server.on('connection', ws => {
+    ws.isAlive=true;ws.on('pong',()=>{ws.isAlive=true;});
     social.attach(ws);
     ws.id = randomUUID(); ws.lastChatTime = 0;
     ws.on('error', () => {});
