@@ -1,21 +1,27 @@
 const { WebSocketServer, WebSocket } = require('ws');
 const { randomUUID } = require('crypto');
 const http = require('http');
-const { createEventHandler } = require('./event-notifier');
+const { createSocialHub } = require('./social-server');
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES = 6 * 1024 * 1024;
-function startServer({ port = 8787, host = '127.0.0.1' } = {}) {
+function startServer({ port = 8787, host = '127.0.0.1', socialPool } = {}) {
+  const social = createSocialHub({pool: socialPool});
   const rooms = new Map();
-  const httpServer = http.createServer(createEventHandler());
+  const httpServer = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    if (req.method === 'GET' && req.url === '/') { res.writeHead(200); res.end('Servidor CONECTA EVUS ativo'); }
+    else { res.writeHead(404); res.end('Não encontrado'); }
+  });
   const server = new WebSocketServer({ server: httpServer, maxPayload: MAX_PAYLOAD_BYTES });
   const closeWebSocket = server.close.bind(server);
-  server.close = callback => { closeWebSocket(callback); httpServer.close(); };
+  server.close = callback => { closeWebSocket(callback); httpServer.close(); social.close()?.catch(() => {}); };
   httpServer.on('error', error => server.emit('error', error));
   httpServer.listen(port, host);
   server.on('error', error => { if (error.code !== 'EADDRINUSE') console.error('Erro no servidor de sinalização:', error.message); });
   function send(ws, data) { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data)); }
   function reject(ws, message, clientId) { send(ws, { type: 'chat-error', message, ...(clientId ? { clientId } : {}) }); }
   server.on('connection', ws => {
+    social.attach(ws);
     ws.id = randomUUID(); ws.lastChatTime = 0;
     ws.on('error', () => {});
     ws.on('message', raw => {

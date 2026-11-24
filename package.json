@@ -1,41 +1,17 @@
 {
-  "name": "conecta-desktop",
-  "version": "1.5.0",
-  "description": "Chamadas de voz e compartilhamento de tela para Windows",
-  "main": "main.js",
+  "name": "conecta-evus-servidor",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Sinalização, perfis, amigos e conversas do CONECTA EVUS",
   "scripts": {
-    "start": "electron .",
-    "signal": "node server.js",
-    "dist": "electron-builder --win nsis"
+    "start": "node server.js",
+    "signal": "node server.js"
+  },
+  "engines": {
+    "node": ">=20 <27"
   },
   "dependencies": {
+    "pg": "^8.16.3",
     "ws": "^8.18.0"
-  },
-  "devDependencies": {
-    "electron": "^35.0.0",
-    "electron-builder": "^26.0.12"
-  },
-  "build": {
-    "appId": "br.conecta.desktop",
-    "productName": "CONECTA EVUS",
-    "files": [
-      "main.js",
-      "preload.js",
-      "server.js",
-      "index.html",
-      "renderer.js",
-      "style.css",
-      "package.json",
-      "assets/icon.ico"
-    ],
-    "win": {
-      "target": "nsis",
-      "icon": "assets/icon.ico"
-    },
-    "nsis": {
-      "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/icon.ico"
-    }
   }
 }
