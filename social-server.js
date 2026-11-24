@@ -18,7 +18,7 @@ function cleanAttachment(input) { if(!input || typeof input !== 'object' || type
 const isImage = x => typeof x === 'string' && (x === '' || (x.length <= MAX_IMAGE && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(x)));
 const trimmed = (value, n) => typeof value === 'string' ? value.trim().slice(0,n) : '';
 const publicUser = u => ({id:u.id, tag:u.tag, username:u.username, displayName:u.display_name, bio:u.bio, avatar:u.avatar, banner:u.banner, pronouns:u.pronouns||'', color:validColor(u.color)?u.color:'#ec8053', presence:presenceValues.has(u.presence)?u.presence:'online'});
-function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 10000 }) : null} = {}) {
+function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 10000 }) : null, getVoiceMembers=()=>[]} = {}) {
   const online = new Map();
   let groups;
   let registrationWindow = 0, registrationCount = 0, authWindow = 0, authCount = 0; const attempts = new Map();
@@ -29,7 +29,7 @@ function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectio
   }
   const send=(ws,x)=>{if(ws.readyState===1)ws.send(JSON.stringify(x));};
   const emit=(id,event)=>{for(const ws of online.get(id)||[])send(ws,{type:'social-event',event});};
-  groups=createGroups({pool,emit,cleanAttachment});
+  groups=createGroups({pool,emit,cleanAttachment,getVoiceMembers});
   const pair=(a,b)=>[a,b].sort();
   async function userById(id){return (await pool.query('SELECT * FROM evus_users WHERE id = $1',[id])).rows[0];}
   async function relationship(a,b){const [x,y]=pair(a,b);return (await pool.query('SELECT * FROM evus_friendships WHERE a = $1 AND b = $2',[x,y])).rows[0];}
@@ -171,6 +171,6 @@ function createSocialHub({pool = process.env.DATABASE_URL ? new Pool({ connectio
     });
     ws.on('close',()=>{const id=ws.socialId;if(!id)return;const connections=online.get(id);connections?.delete(ws);if(!connections?.size){online.delete(id);if(pool)list(id).then(({friends})=>friends.forEach(f=>emit(f.id,{kind:'refresh'}))).catch(()=>{});}});
   }
-  return {attach,ready,authorizeVoice:async(session,channelId)=>{if(!pool)return false;await ready();return groups.authorizeVoice(session,channelId);},membership:groups.membership,close:()=>pool?.end()};
+  return {attach,ready,authorizeVoice:async(session,channelId)=>{if(!pool)return false;await ready();return groups.authorizeVoice(session,channelId);},membership:groups.membership,notifyVoice:(groupId,channelId)=>groups.broadcast(groupId,{kind:'group-voice-changed',groupId,channelId}),close:()=>pool?.end()};
 }
 module.exports={createSocialHub};

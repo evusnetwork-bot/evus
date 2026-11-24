@@ -5,8 +5,11 @@ const { createSocialHub } = require('./social-server');
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES = 6 * 1024 * 1024;
 function startServer({ port = 8787, host = '127.0.0.1', socialPool, heartbeatMs = 30000 } = {}) {
-  const social = createSocialHub({pool: socialPool});
   const rooms = new Map();
+  const social = createSocialHub({pool: socialPool, getVoiceMembers: channelId => {
+    const peers=rooms.get('group-'+channelId);if(!peers)return [];
+    const seen=new Set(),result=[];for(const peer of peers.values()){const person=peer.voiceIdentity;if(!person||seen.has(person.userId))continue;seen.add(person.userId);result.push({id:person.userId,displayName:person.displayName,avatar:person.avatar});}return result;
+  }});
   const httpServer = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     if (req.method === 'GET' && req.url === '/') { res.writeHead(200); res.end('Servidor CONECTA EVUS ativo'); }
@@ -39,10 +42,11 @@ function startServer({ port = 8787, host = '127.0.0.1', socialPool, heartbeatMs 
         if (!rooms.has(room)) rooms.set(room, new Map());
         const peers = rooms.get(room);
         if (peers.size >= 6) return send(ws, { type: 'error', message: 'Esta sala está cheia (limite de 6 pessoas).' });
-        ws.room = room; ws.name = name;
-        send(ws, { type: 'joined', id: ws.id, peers: [...peers.values()].map(p => ({ id: p.id, name: p.name })), capabilities: { chat: true, maxFileBytes: MAX_FILE_BYTES } });
+        ws.room = room; ws.name = ws.voiceIdentity?.displayName || name;
+        send(ws, { type: 'joined', id: ws.id, peers: [...peers.values()].map(p => ({ id: p.id, name: p.name, ...(p.voiceIdentity?{avatar:p.voiceIdentity.avatar}: {}) })), ...(ws.voiceIdentity?{profile:{id:ws.voiceIdentity.userId,displayName:ws.voiceIdentity.displayName,avatar:ws.voiceIdentity.avatar}}:{}), capabilities: { chat: true, maxFileBytes: MAX_FILE_BYTES } });
         peers.set(ws.id, ws);
-        for (const peer of peers.values()) if (peer !== ws) send(peer, { type: 'peer-joined', id: ws.id, name: ws.name });
+        for (const peer of peers.values()) if (peer !== ws) send(peer, { type: 'peer-joined', id: ws.id, name: ws.name, ...(ws.voiceIdentity?{avatar:ws.voiceIdentity.avatar}: {}) });
+        if(ws.voiceIdentity)social.notifyVoice(ws.voiceIdentity.groupId,ws.voiceChannel).catch(()=>{});
       } else if (m.type === 'signal' && ws.room && typeof m.to === 'string') {
         const peer = rooms.get(ws.room)?.get(m.to);
         if (peer && raw.length <= 128 * 1024 && m.data && typeof m.data === 'object') send(peer, { type: 'signal', from: ws.id, data: m.data });
@@ -72,6 +76,7 @@ function startServer({ port = 8787, host = '127.0.0.1', socialPool, heartbeatMs 
       const peers = rooms.get(ws.room); if (!peers) return;
       peers.delete(ws.id); for (const peer of peers.values()) send(peer, { type: 'peer-left', id: ws.id });
       if (!peers.size) rooms.delete(ws.room);
+      if(ws.voiceIdentity)social.notifyVoice(ws.voiceIdentity.groupId,ws.voiceChannel).catch(()=>{});
     });
   });
   server.on('listening', () => console.log(`Sinalização ativa em ${host}:${port}`));
