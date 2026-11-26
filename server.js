@@ -6,7 +6,9 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES = 6 * 1024 * 1024;
 function startServer({ port = 8787, host = '127.0.0.1', socialPool, heartbeatMs = 30000 } = {}) {
   const rooms = new Map();
-  const social = createSocialHub({pool: socialPool, getVoiceMembers: channelId => {
+  const social = createSocialHub({pool: socialPool, onServerDeleted: groupId => {
+    for(const client of server.clients)if(client.voiceIdentity?.groupId===groupId)client.close(4003,'Servidor excluído');
+  }, getVoiceMembers: channelId => {
     const peers=rooms.get('group-'+channelId);if(!peers)return [];
     const seen=new Set(),result=[];for(const peer of peers.values()){const person=peer.voiceIdentity;if(!person||seen.has(person.userId))continue;seen.add(person.userId);result.push({id:person.userId,displayName:person.displayName,avatar:person.avatar});}return result;
   }});

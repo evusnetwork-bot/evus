@@ -2,7 +2,7 @@
 const {randomUUID,randomBytes,createHash}=require('crypto');
 const trim=(v,n)=>typeof v==='string'?v.trim().slice(0,n):'';
 const emojis=new Set(['👍','❤️','😂','😮','😢','🎉']);
-function createGroups({pool,emit,cleanAttachment,getVoiceMembers=()=>[]}) {
+function createGroups({pool,emit,cleanAttachment,getVoiceMembers=()=>[],onServerDeleted=()=>{}}) {
   async function initialize(){
     await pool.query('CREATE TABLE IF NOT EXISTS evus_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL REFERENCES evus_users(id), invite_code TEXT NOT NULL UNIQUE, created_at BIGINT NOT NULL)');
     await pool.query("ALTER TABLE evus_groups ADD COLUMN IF NOT EXISTS icon TEXT NOT NULL DEFAULT '✳'");
@@ -37,6 +37,14 @@ function createGroups({pool,emit,cleanAttachment,getVoiceMembers=()=>[]}) {
     }
     const groupId=trim(msg.groupId,64);
     if(action==='group-details')return details(groupId,self);
+    if(action==='group-server-delete'){
+      if(typeof msg.confirmName!=='string'||!msg.confirmName||msg.confirmName.length>40)throw Error('Informe o nome exato do servidor para confirmar.');
+      const removed=await pool.query("WITH targets AS (SELECT user_id FROM evus_group_members WHERE group_id=$1), deleted AS (DELETE FROM evus_groups WHERE id=$1 AND owner_id=$2 AND kind='server' AND name=$3 RETURNING id) SELECT deleted.id,targets.user_id FROM deleted LEFT JOIN targets ON TRUE",[groupId,self,msg.confirmName]);
+      if(!removed.rows.length)throw Error('Não foi possível excluir: confira o nome e se você é o proprietário do servidor.');
+      try{onServerDeleted(groupId);}catch(e){console.error('Não foi possível encerrar todas as chamadas do servidor:',e.message);}
+      for(const row of removed.rows)if(row.user_id)emit(row.user_id,{kind:'group-refresh',groupId,deleted:true});
+      return {deleted:true};
+    }
     if(action==='group-channel-create'){await permit(groupId,self,'manageChannels');const g=(await pool.query('SELECT kind FROM evus_groups WHERE id=$1',[groupId])).rows[0];if(g?.kind!=='server')throw Error('Canais adicionais estão disponíveis em servidores.');const name=trim(msg.name,40),kind=msg.kind;if(!name||!['text','voice'].includes(kind))throw Error('Informe um nome e tipo de canal válidos.');await pool.query('INSERT INTO evus_group_channels(id,group_id,name,kind,created_at) VALUES($1,$2,$3,$4,$5)',[randomUUID(),groupId,name,kind,Date.now()]);await broadcast(groupId,{kind:'group-refresh',groupId});return details(groupId,self);}
     if(action==='group-invite-reset'){await permit(groupId,self,'manageInvites');await pool.query('UPDATE evus_groups SET invite_code=$1 WHERE id=$2',['EVUSG-'+randomBytes(18).toString('base64url'),groupId]);return details(groupId,self);}
     if(action==='group-role'||action==='group-kick'){
